@@ -53,7 +53,7 @@ jobs:
       - name: Install buildozer
         run: |
           python -m pip install --upgrade pip
-          pip install buildozer==1.5.1 cython==0.29.36
+          pip install buildozer==1.6.0 cython==0.29.36
           buildozer version
 
       # SDK/NDK 版本由 buildozer.spec 决定（已钉死 ndk=26b / archs=arm64-v8a），
