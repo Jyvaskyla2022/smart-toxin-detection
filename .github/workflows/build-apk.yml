@@ -1,0 +1,88 @@
+# ============================================================
+#  Smart Toxin Detection —— GitHub Actions 云端打包 APK
+#  代码设计者：PhLi
+#
+#  用法：把本项目推到 GitHub → Actions 页面选「Build Android APK」
+#        → 点一次「Run workflow」→ 下载 SmartToxinDetection-apk 产物。
+#  电脑上无需安装 WSL / Android Studio。
+#
+#  设计要点：
+#   · 不用第三方 buildozer action，直接 pip 装固定版本的 buildozer，
+#     避免 action 版本漂移；
+#   · 构建全程 tee 到 android/build.log，失败时自动打印最后 200 行、
+#     并把完整日志作为 buildozer-log 产物上传——再也不会出现
+#     「Buildozer failed ... 错误藏在上面的日志里」却看不到的情况；
+#   · 不缓存 ~/.buildozer：缓存会把旧版 SDK/NDK 带回来（本次
+#     r30b 混进构建环境的最大嫌疑），宁可每次多花十几分钟。
+# ============================================================
+
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - "android/**"
+      - ".github/workflows/build-apk.yml"
+
+jobs:
+  build-apk:
+    name: Build APK (buildozer)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # buildozer 编译 kivy + numpy 至少要 12~15GB，先清掉 runner 自带的
+      # 大件（约 6GB）。注意：不要删 /usr/local/lib/android，
+      # ANDROID_SDK_ROOT 还指着它，删了 gradle 会报找不到 SDK。
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af || true
+          df -h /
+
+      - name: Install buildozer
+        run: |
+          python -m pip install --upgrade pip
+          pip install buildozer==1.5.1 cython==0.29.36
+          buildozer version
+
+      # SDK/NDK 版本由 buildozer.spec 决定（已钉死 ndk=26b / archs=arm64-v8a），
+      # 这里不再额外注入任何环境变量，避免与 spec 冲突
+      - name: Build APK
+        working-directory: android
+        run: |
+          set -o pipefail
+          buildozer -v android debug 2>&1 | tee build.log
+          ls -lh bin/
+
+      - name: Show tail of log on failure
+        if: failure()
+        working-directory: android
+        run: |
+          echo "=== 构建失败：真正的报错通常在更早的位置，最后 200 行如下 ==="
+          tail -n 200 build.log || echo "(没有 build.log，说明在 pip 安装阶段就挂了)"
+
+      - name: Upload build log (失败时排查用)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: buildozer-log
+          path: android/build.log
+          if-no-files-found: ignore
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmartToxinDetection-apk
+          path: android/bin/*.apk
+          if-no-files-found: error
