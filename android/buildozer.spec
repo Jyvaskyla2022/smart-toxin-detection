@@ -34,6 +34,7 @@ android.ndk = 26b
 # 只编 arm64-v8a：armeabi-v7a 上 numpy/OpenBLAS 交叉编译经常失败，
 # 且双架构体积翻倍、构建时间翻倍、更容易把 runner 的磁盘耗尽
 android.archs = arm64-v8a
+p4a.branch = v2024.01.21
 
 # 自动接受 SDK 许可，避免打包中途卡在交互式确认
 android.accept_sdk_license = True
