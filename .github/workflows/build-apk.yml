@@ -40,13 +40,14 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          
+
+      # p4a 的打包最后一步用 Gradle 8 + AGP，要求 JDK 17；
+      # runner 默认 JAVA_HOME 是 11，不切换会在「gradlew assembleDebug」处失败
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
-
 
       # buildozer 编译 kivy + numpy 至少要 12~15GB，先清掉 runner 自带的
       # 大件（约 6GB）。注意：不要删 /usr/local/lib/android，
@@ -63,7 +64,35 @@ jobs:
           pip install buildozer==1.6.0 cython==0.29.36
           buildozer version
 
-      # SDK/NDK 版本由 buildozer.spec 决定（已钉死 ndk=26b / archs=arm64-v8a），
+      # 预检：缺文件时马上报清楚，而不是等 20 分钟到打包阶段才抛
+      # FileNotFoundError（2026-11-12 那次 android/icon.png 缺失就是这样踩的：
+      # 前面几千行编译全过，最后一行才说图标文件不存在）。
+      # 图标只影响外观，缺了自动降级为默认图标继续构建；其它文件缺了直接失败。
+      - name: Preflight check (必需文件)
+        working-directory: android
+        run: |
+          missing=0
+          for f in main.py portable_model.py fonts/DroidSansFallback.ttf; do
+            if [ -f "$f" ]; then
+              echo "OK  $f ($(du -h "$f" | cut -f1))"
+            else
+              echo "::error file=android/$f::$f 缺失，请先上传该文件"
+              missing=1
+            fi
+          done
+          if [ ! -f icon.png ]; then
+            echo "::warning::android/icon.png 缺失 —— 本次构建使用默认图标（不影响功能）。把 512x512 的 icon.png 上传到 android/ 后重跑即可恢复自定义图标。"
+            sed -i '/^[[:space:]]*icon\.filename[[:space:]]*=/d' buildozer.spec
+            echo "已临时移除 buildozer.spec 中的 icon.filename 行"
+          else
+            echo "OK  icon.png ($(du -h icon.png | cut -f1))"
+          fi
+          if [ "$missing" -ne 0 ]; then
+            echo "缺少必需文件，终止构建。"
+            exit 1
+          fi
+
+      # SDK/NDK 版本由 buildozer.spec 决定（已钉死 ndk=25b / archs=arm64-v8a），
       # 这里不再额外注入任何环境变量，避免与 spec 冲突
       - name: Build APK
         working-directory: android
