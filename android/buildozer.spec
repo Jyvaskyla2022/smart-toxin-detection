@@ -30,7 +30,7 @@ android.api = 34
 android.minapi = 24
 # NDK 明确钉死 26b：新版（如 r30b）与 python-for-android 尚不兼容，
 # 若不写，某些环境下 buildozer 会自动拉最新 NDK 导致编译失败
-android.ndk = 26b
+android.ndk = 25b
 # 只编 arm64-v8a：armeabi-v7a 上 numpy/OpenBLAS 交叉编译经常失败，
 # 且双架构体积翻倍、构建时间翻倍、更容易把 runner 的磁盘耗尽
 android.archs = arm64-v8a
