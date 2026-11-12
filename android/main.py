@@ -24,6 +24,23 @@ from kivy.uix.scrollview import ScrollView
 
 from portable_model import PortableModel
 
+# ---- 中文支持 -------------------------------------------------------------
+# Kivy 默认字体（Roboto）不含 CJK 字形，安卓上所有中文都会显示成方块。
+# 把随 APK 打包的 DroidSansFallback.ttf 注册为默认字体名 "Roboto"，
+# 这样所有 Label / Button / Popup 无需逐个设置 font_name。
+_FONT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "fonts", "DroidSansFallback.ttf")
+if os.path.exists(_FONT_PATH):
+    from kivy.core.text import LabelBase
+    LabelBase.register(
+        name="Roboto",
+        fn_regular=_FONT_PATH,
+        fn_bold=_FONT_PATH,
+        fn_italic=_FONT_PATH,
+        fn_bold_italic=_FONT_PATH,
+    )
+# ---------------------------------------------------------------------------
+
 APP_NAME = "Smart Toxin Detection"
 APP_AUTHOR = "PhLi"
 APP_VERSION = "2.0.0"
