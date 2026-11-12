@@ -26,23 +26,91 @@ from portable_model import PortableModel
 
 # ---- 中文支持 -------------------------------------------------------------
 # Kivy 默认字体（Roboto）不含 CJK 字形，安卓上所有中文都会显示成方块。
-# 把随 APK 打包的 DroidSansFallback.ttf 注册为默认字体名 "Roboto"，
-# 这样所有 Label / Button / Popup 无需逐个设置 font_name。
-# 注意：注册失败绝不能让程序崩掉（宁可显示方块也不要闪退），所以包一层 try。
-_FONT_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "fonts", "DroidSansFallback.ttf")
-if os.path.exists(_FONT_PATH):
+# 方案：把随 APK 打包的 DroidSansFallback.ttf 注册为默认字体名 "Roboto"。
+# 注册统一在模块加载末尾执行（_register_cjk_font），字体文件三级查找：
+#   1) p4a 正常解包路径  app目录/fonts/DroidSansFallback.ttf
+#   2) app目录 根下
+#   3) 从 APK assets 现场复制到应用私有目录再注册（解包缺失时的兜底）
+# 结果记录在 _FONT_STATUS，显示在界面底部一行小字（纯 ASCII），方便截图排查。
+_FONT_NAME = "DroidSansFallback.ttf"
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+_FONT_CANDIDATES = [
+    os.path.join(_APP_DIR, "fonts", _FONT_NAME),
+    os.path.join(_APP_DIR, _FONT_NAME),
+    "/sdcard/SmartToxinDetection/fonts/" + _FONT_NAME,
+]
+_FONT_STATUS = "FONT: pending"
+
+
+def _private_dir():
+    try:
+        from jnius import autoclass
+        act = autoclass("org.kivy.android.PythonActivity").mActivity
+        return act.getFilesDir().getAbsolutePath()
+    except Exception:
+        return _APP_DIR
+
+
+def _copy_asset_font():
+    """从 APK assets 里把字体复制到私有目录（解包缺失时的兜底）。"""
+    try:
+        from jnius import autoclass
+        act = autoclass("org.kivy.android.PythonActivity").mActivity
+        am = act.getAssets()
+        dst_dir = _private_dir()
+        for asset in ("private/fonts/" + _FONT_NAME,
+                      "fonts/" + _FONT_NAME,
+                      "app/fonts/" + _FONT_NAME):
+            try:
+                stream = am.open(asset)
+            except Exception:
+                continue
+            try:
+                dst = os.path.join(dst_dir, _FONT_NAME)
+                buf = bytearray(65536)
+                with open(dst, "wb") as out:
+                    while True:
+                        n = stream.read(buf)
+                        if n <= 0:
+                            break
+                        out.write(bytes(buf[:n]))
+                stream.close()
+                return dst
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return None
+
+
+def _register_cjk_font():
+    global _FONT_STATUS
+    path = None
+    for p in _FONT_CANDIDATES:
+        if os.path.exists(p):
+            path = p
+            break
+    if path is None:
+        path = _copy_asset_font()
+    if path is None:
+        try:
+            entries = ",".join(sorted(os.listdir(_APP_DIR))[:10])
+        except Exception as e:
+            entries = "list failed: " + str(e)
+        _FONT_STATUS = "FONT: file missing | APPDIR: " + entries
+        return
     try:
         from kivy.core.text import LabelBase
         LabelBase.register(
             name="Roboto",
-            fn_regular=_FONT_PATH,
-            fn_bold=_FONT_PATH,
-            fn_italic=_FONT_PATH,
-            fn_bold_italic=_FONT_PATH,
+            fn_regular=path,
+            fn_bold=path,
+            fn_italic=path,
+            fn_bold_italic=path,
         )
-    except Exception as _font_err:  # pragma: no cover - 防御性兜底
-        print("中文字体注册失败（回退默认字体）：", _font_err)
+        _FONT_STATUS = "FONT: OK " + path
+    except Exception as e:
+        _FONT_STATUS = "FONT: register failed " + repr(e)[:80]
 # ---------------------------------------------------------------------------
 
 APP_NAME = "Smart Toxin Detection"
@@ -225,6 +293,11 @@ def _pick_file(mime: str, on_path):
         req)
 
 
+# 模块加载的统一入口：此时 _ANDROID 已就绪、界面 Label 尚未创建，
+# 在这里注册字体正好赶在第一个控件之前
+_register_cjk_font()
+
+
 class SmartToxinApp(App):
     title = f"{APP_NAME} v{APP_VERSION} (by {APP_AUTHOR})"
 
@@ -268,6 +341,14 @@ class SmartToxinApp(App):
                           texture_size=lambda inst, ts: setattr(inst, "height", ts[1]))
         scroll.add_widget(self.lbl_log)
         root.add_widget(scroll)
+
+        # 字体诊断行（纯 ASCII，任何状态下都可读；中文正常时它无存在感，
+        # 中文变方块时请把这行截图发给开发者）
+        self.lbl_diag = Label(text=_FONT_STATUS[:110], size_hint_y=None,
+                              height=dp(24), halign="left", font_size="10sp",
+                              color=(0.45, 0.50, 0.49, 1),
+                              text_size=(Window.width - dp(20), None))
+        root.add_widget(self.lbl_diag)
 
         self.model = None
         self.records = []
