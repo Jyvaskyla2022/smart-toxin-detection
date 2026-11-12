@@ -28,17 +28,21 @@ from portable_model import PortableModel
 # Kivy 默认字体（Roboto）不含 CJK 字形，安卓上所有中文都会显示成方块。
 # 把随 APK 打包的 DroidSansFallback.ttf 注册为默认字体名 "Roboto"，
 # 这样所有 Label / Button / Popup 无需逐个设置 font_name。
+# 注意：注册失败绝不能让程序崩掉（宁可显示方块也不要闪退），所以包一层 try。
 _FONT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "fonts", "DroidSansFallback.ttf")
 if os.path.exists(_FONT_PATH):
-    from kivy.core.text import LabelBase
-    LabelBase.register(
-        name="Roboto",
-        fn_regular=_FONT_PATH,
-        fn_bold=_FONT_PATH,
-        fn_italic=_FONT_PATH,
-        fn_bold_italic=_FONT_PATH,
-    )
+    try:
+        from kivy.core.text import LabelBase
+        LabelBase.register(
+            name="Roboto",
+            fn_regular=_FONT_PATH,
+            fn_bold=_FONT_PATH,
+            fn_italic=_FONT_PATH,
+            fn_bold_italic=_FONT_PATH,
+        )
+    except Exception as _font_err:  # pragma: no cover - 防御性兜底
+        print("中文字体注册失败（回退默认字体）：", _font_err)
 # ---------------------------------------------------------------------------
 
 APP_NAME = "Smart Toxin Detection"
@@ -57,6 +61,168 @@ try:
 except Exception:  # pragma: no cover - 非安卓环境
     request_permissions = None
     _PERMS = []
+
+# ---- 崩溃自报告 ------------------------------------------------------------
+# 闪退时用户什么都看不到，没法反馈。这里把启动失败的堆栈：
+#   1) 直接弹到屏幕上（可滚动对话框，方便截图发给开发者）；
+#   2) 写入手机可见目录的 crash.log。
+def _external_report_dir():
+    """用户在文件管理器里能找到的目录（优先应用专属外部目录）。"""
+    try:
+        from jnius import autoclass
+        act = autoclass("org.kivy.android.PythonActivity").mActivity
+        d = act.getExternalFilesDir(None)
+        if d is not None:
+            return d.getAbsolutePath()   # /storage/emulated/0/Android/data/<包名>/files
+    except Exception:
+        pass
+    return "/sdcard/SmartToxinDetection"
+
+
+def _show_crash_dialog(text):
+    try:
+        from jnius import autoclass, PythonJavaClass, java_method
+
+        class _Runner(PythonJavaClass):
+            __javainterfaces__ = ["java/lang/Runnable"]
+
+            def __init__(self, msg):
+                super().__init__()
+                self.msg = msg
+
+            @java_method("()V")
+            def run(self):
+                try:
+                    act = autoclass("org.kivy.android.PythonActivity").mActivity
+                    tv = autoclass("android.widget.TextView")(act)
+                    tv.setText(self.msg)
+                    tv.setTextSize(11.0)
+                    tv.setPadding(36, 36, 36, 36)
+                    scroll = autoclass("android.widget.ScrollView")(act)
+                    scroll.addView(tv)
+                    builder = autoclass("android.app.AlertDialog$Builder")(act)
+                    builder.setTitle("启动失败（请截图反馈）")
+                    builder.setView(scroll)
+                    builder.setPositiveButton("关闭", None)
+                    builder.show()
+                except Exception:
+                    pass
+
+        act = autoclass("org.kivy.android.PythonActivity").mActivity
+        act.runOnUiThread(_Runner(text))
+    except Exception:
+        pass
+
+
+def _report_crash():
+    import traceback
+    tb = traceback.format_exc()
+    saved = []
+    for d in {_external_report_dir(), "/sdcard/SmartToxinDetection"}:
+        try:
+            os.makedirs(d, exist_ok=True)
+            p = os.path.join(d, "crash.log")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(tb)
+            saved.append(p)
+        except Exception:
+            pass
+    msg = tb[-1800:]
+    if saved:
+        msg += "\n\n—— 日志已保存到 ——\n" + "\n".join(saved)
+    _show_crash_dialog(msg)
+
+
+# ---- 系统文件选择器（SAF）--------------------------------------------------
+# 安卓 11+（含鸿蒙）启用“分区存储”后，普通文件 API 看不到 Download /
+# Documents 里的非媒体文件（.stmodel 模型正是这种），所以 Kivy 内置的
+# FileChooserListView 必然“扫描不到手机中的模型”。唯一可靠的方式是调用
+# 系统文件选择器（Storage Access Framework）：用户选中哪个文件，系统就把
+# 那个文件授权给本应用，我们再把它复制进应用私有目录加载。
+try:
+    from android import activity as _a_activity  # type: ignore
+    _ANDROID = True
+except Exception:            # 桌面调试环境没有 android 模块
+    _a_activity = None
+    _ANDROID = False
+
+_PICKER = {"next_req": 820001, "handlers": {}}
+
+
+def _on_any_picker_result(request_code, result_code, data):
+    """全局分发：系统文件选择器的返回结果（android.activity 只绑一次）。"""
+    handler = _PICKER["handlers"].pop(request_code, None)
+    if handler is not None:
+        try:
+            handler(result_code, data)
+        except Exception:
+            pass
+
+
+if _ANDROID:
+    _a_activity.bind(on_activity_result=_on_any_picker_result)
+
+
+def _pick_file(mime: str, on_path):
+    """弹出系统文件选择器；选中后复制到应用私有目录，回调 on_path(path)。
+
+    on_path(None) 表示用户取消；on_path(None, exc) 表示出错。
+    """
+    from jnius import autoclass, cast
+
+    mActivity = autoclass("org.kivy.android.PythonActivity").mActivity
+    Activity = autoclass("android.app.Activity")
+    Intent = autoclass("android.content.Intent")
+    String = autoclass("java.lang.String")
+
+    req = _PICKER["next_req"]
+    _PICKER["next_req"] += 1
+
+    def handler(result_code, data):
+        if result_code != Activity.RESULT_OK or data is None:
+            on_path(None)
+            return
+        try:
+            resolver = mActivity.getContentResolver()
+            uri = data.getData()
+            # 1) 查询原始文件名（保留 .stmodel 等后缀）
+            name = None
+            try:
+                cur = resolver.query(uri, None, None, None, None)
+                if cur is not None:
+                    if cur.moveToFirst():
+                        idx = cur.getColumnIndex("_display_name")
+                        if idx >= 0:
+                            name = cur.getString(idx)
+                    cur.close()
+            except Exception:
+                name = None
+            if not name:
+                name = f"imported_{int(time.time())}"
+            # 2) 把内容流复制到应用私有目录（分区存储下唯一可靠的读取方式）
+            user_dir = App.get_running_app().user_data_dir
+            dst = os.path.join(user_dir, name)
+            stream = resolver.openInputStream(uri)
+            buf = bytearray(65536)
+            with open(dst, "wb") as out:
+                while True:
+                    n = stream.read(buf)   # jnius 支持 bytearray 输出缓冲
+                    if n <= 0:
+                        break
+                    out.write(bytes(buf[:n]))
+            stream.close()
+            on_path(dst)
+        except Exception as e:
+            on_path(None, e)
+
+    _PICKER["handlers"][req] = handler
+    intent = Intent(Intent.ACTION_GET_CONTENT)
+    intent.setType(mime)
+    intent.addCategory(Intent.CATEGORY_OPENABLE)
+    mActivity.startActivityForResult(
+        Intent.createChooser(intent,
+                             cast("java.lang.CharSequence", String("选择文件"))),
+        req)
 
 
 class SmartToxinApp(App):
@@ -143,11 +309,31 @@ class SmartToxinApp(App):
             pass
 
     def pick_model(self, *_):
+        # 首选：系统文件选择器（安卓 11+/鸿蒙 分区存储下唯一能选到
+        # Download/Documents 里 .stmodel 的方式）
+        if _ANDROID:
+            try:
+                _pick_file("*/*", self._on_imported_model)
+                return
+            except Exception as e:
+                self._alert(f"系统文件选择器启动失败：{e}\n改用内置浏览器。")
+        # 后备：内置文件浏览器（老安卓可用；安卓 11+ 看不到非媒体文件）
         start = "/storage/emulated/0" if os.path.isdir("/storage/emulated/0") else "."
         fc = FileChooserListView(path=start, filters=["*.stmodel"])
         popup = Popup(title="选择 .stmodel 便携模型", content=fc, size_hint=(0.95, 0.9))
         fc.bind(on_submit=lambda inst, sel, touch: self._on_model(sel, popup))
         popup.open()
+
+    def _on_imported_model(self, path, err=None):
+        if err is not None:
+            self._alert(f"导入模型失败：{err}")
+            return
+        if not path:
+            return  # 用户取消
+        try:
+            self._load_model(path)
+        except Exception as e:
+            self._alert(f"模型加载失败：{e}")
 
     def _on_model(self, selection, popup):
         if not selection:
@@ -179,11 +365,26 @@ class SmartToxinApp(App):
         if self.model is None:
             self._alert("请先选择便携模型（.stmodel）")
             return
+        # 首选：系统文件选择器（相册 / 云盘 / 任意来源都能选，统一走 SAF）
+        if _ANDROID:
+            try:
+                _pick_file("image/*", self._on_imported_image)
+                return
+            except Exception as e:
+                self._alert(f"系统文件选择器启动失败：{e}\n改用内置浏览器。")
+        # 后备：内置文件浏览器
         start = "/storage/emulated/0/DCIM" if os.path.isdir("/storage/emulated/0/DCIM") else "."
         fc = FileChooserListView(path=start, filters=["*.jpg", "*.jpeg", "*.png"])
         popup = Popup(title="选择试管照片", content=fc, size_hint=(0.95, 0.9))
         fc.bind(on_submit=lambda inst, sel, touch: self._on_image(sel, popup))
         popup.open()
+
+    def _on_imported_image(self, path, err=None):
+        if err is not None:
+            self._alert(f"导入照片失败：{err}")
+            return
+        if path:
+            self._predict_path(path)
 
     def _on_image(self, selection, popup):
         if selection and os.path.isfile(selection[0]):
@@ -228,4 +429,14 @@ class SmartToxinApp(App):
 
 
 if __name__ == "__main__":
-    SmartToxinApp().run()
+    try:
+        SmartToxinApp().run()
+    except SystemExit:
+        pass
+    except Exception:
+        # 启动失败时把堆栈弹到屏幕上并写入 crash.log，方便用户截图反馈
+        try:
+            _report_crash()
+        except Exception:
+            pass
+        raise
