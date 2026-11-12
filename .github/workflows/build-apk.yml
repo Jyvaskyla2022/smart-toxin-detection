@@ -40,6 +40,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
 
       # buildozer 编译 kivy + numpy 至少要 12~15GB，先清掉 runner 自带的
       # 大件（约 6GB）。注意：不要删 /usr/local/lib/android，
