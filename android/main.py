@@ -323,7 +323,7 @@ def _capture_camera_photo(on_path):
     EXTRA_OUTPUT 交给系统相机（带读写授权 flags），拍完后把内容流复制回
     应用私有目录——与"导入模型"同一套安全模式。
     """
-    from jnius import autoclass
+    from jnius import autoclass, cast
 
     mActivity = autoclass("org.kivy.android.PythonActivity").mActivity
     Activity = autoclass("android.app.Activity")
@@ -390,7 +390,11 @@ def _capture_camera_photo(on_path):
 
     _PICKER["handlers"][req] = handler
     intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
-    intent.putExtra(MediaStore.EXTRA_OUTPUT, uri)
+    # 【踩坑】pyjnius 无法把 Uri 自动匹配到 putExtra(String, Parcelable) 重载，
+    # 会误选 (String, String) 版本报 "Invalid instance of 'android/net/Uri'
+    # passed for a 'java/lang/String'"，必须用 cast 显式转成 Parcelable
+    intent.putExtra(MediaStore.EXTRA_OUTPUT,
+                    cast("android/os/Parcelable", uri))
     intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
     mActivity.startActivityForResult(intent, req)
@@ -444,14 +448,6 @@ class SmartToxinApp(App):
                           texture_size=lambda inst, ts: setattr(inst, "height", ts[1]))
         scroll.add_widget(self.lbl_log)
         root.add_widget(scroll)
-
-        # 字体诊断行（纯 ASCII，任何状态下都可读；中文正常时它无存在感，
-        # 中文变方块时请把这行截图发给开发者）
-        self.lbl_diag = Label(text=_FONT_STATUS[:110], size_hint_y=None,
-                              height=dp(24), halign="left", font_size="10sp",
-                              color=(0.45, 0.50, 0.49, 1),
-                              text_size=(Window.width - dp(20), None))
-        root.add_widget(self.lbl_diag)
 
         self.model = None
         self.records = []
