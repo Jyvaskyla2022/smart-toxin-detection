@@ -211,6 +211,48 @@ def _report_crash():
     _show_crash_dialog(msg)
 
 
+# ---- 运行轨迹（trace）------------------------------------------------------
+# 闪退如果是原生层崩溃（如 SDL2 恢复、pyjnius 线程问题），python 的
+# try/except 拦不住、crash.log 也不会有内容。这里在关键节点写轨迹文件，
+# 下次打开 App 时自动弹出上次的轨迹，精确定位死在哪一步。
+def _trace_path():
+    try:
+        from jnius import autoclass
+        act = autoclass("org.kivy.android.PythonActivity").mActivity
+        d = act.getExternalFilesDir(None)
+        if d is not None:
+            return os.path.join(d.getAbsolutePath(), "trace.log")
+    except Exception:
+        pass
+    return os.path.join(_private_dir(), "trace.log")
+
+
+def _trace(msg):
+    try:
+        p = _trace_path()
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(time.strftime("[%H:%M:%S] ") + msg + "\n")
+    except Exception:
+        pass
+
+
+def _read_trace():
+    try:
+        with open(_trace_path(), encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+
+def _clear_trace():
+    try:
+        with open(_trace_path(), "w", encoding="utf-8") as f:
+            f.write("")
+    except Exception:
+        pass
+
+
 # ---- 系统文件选择器（SAF）--------------------------------------------------
 # 安卓 11+（含鸿蒙）启用“分区存储”后，普通文件 API 看不到 Download /
 # Documents 里的非媒体文件（.stmodel 模型正是这种），所以 Kivy 内置的
@@ -260,8 +302,10 @@ def _pick_file(mime: str, on_path):
         # ⚠ 本回调运行在安卓 UI 线程：只做文件复制这类线程安全操作，
         # 界面更新必须用 Clock.schedule_once 转交 Kivy 主线程，
         # 否则跨线程操作 Kivy 控件会直接把 App 搞崩（拍照返回时已实测踩坑）
+        _trace("picker: UIthread result_code=%d" % result_code)
         try:
             if result_code != Activity.RESULT_OK or data is None:
+                _trace("picker: canceled, schedule on_path(None)")
                 Clock.schedule_once(lambda dt: on_path(None), 0)
                 return
             resolver = mActivity.getContentResolver()
@@ -291,8 +335,10 @@ def _pick_file(mime: str, on_path):
                         break
                     out.write(bytes(buf[:n]))
             stream.close()
+            _trace("picker: copied ok, schedule on_path")
             Clock.schedule_once(lambda dt, p=dst: on_path(p), 0)
         except Exception as e:
+            _trace("picker: error " + str(e)[:120])
             Clock.schedule_once(lambda dt, err=e: on_path(None, err), 0)
 
     _PICKER["handlers"][req] = handler
@@ -353,8 +399,10 @@ def _capture_camera_photo(on_path):
     def handler(result_code, data):
         # ⚠ 本回调运行在安卓 UI 线程（Kivy 非线程安全）：
         # 只做复制等安全操作，界面更新一律 Clock.schedule_once 转交主线程
+        _trace("camera: UIthread result_code=%d" % result_code)
         try:
             if result_code != Activity.RESULT_OK:
+                _trace("camera: canceled, schedule on_path(None)")
                 Clock.schedule_once(lambda dt: on_path(None), 0)
                 return
             target = uri
@@ -376,6 +424,7 @@ def _capture_camera_photo(on_path):
                 stream.close()
             except Exception:
                 copied = -1
+            _trace("camera: copied=%d bytes" % copied)
             if copied <= 0:
                 # 兜底：部分相机忽略 EXTRA_OUTPUT，只返回缩略图 Bitmap
                 bmp = None
@@ -388,8 +437,10 @@ def _capture_camera_photo(on_path):
                 if bmp is None:
                     raise RuntimeError("相机未返回照片数据")
                 _save_bitmap(bmp, dst)
+            _trace("camera: schedule on_path")
             Clock.schedule_once(lambda dt, p=dst: on_path(p), 0)
         except Exception as e:
+            _trace("camera: error " + str(e)[:120])
             Clock.schedule_once(lambda dt, err=e: on_path(None, err), 0)
 
     _PICKER["handlers"][req] = handler
@@ -456,7 +507,26 @@ class SmartToxinApp(App):
         self.model = None
         self.records = []
         self._auto_load_last()
+        _trace("kivy: build done")
+        # 上次会话若留有轨迹且最后一笔不是正常退出 → 判定为上闪退，弹出供截图
+        prev = _read_trace().strip()
+        if prev:
+            _clear_trace()
+            last = prev.splitlines()[-1]
+            if "app: exit" not in last:
+                Clock.schedule_once(
+                    lambda dt: self._alert("上次运行轨迹（请截图发我）：\n" + prev[-900:]), 0)
         return root
+
+    def on_pause(self):
+        _trace("lifecycle: on_pause")
+        return True
+
+    def on_resume(self):
+        _trace("lifecycle: on_resume")
+
+    def on_stop(self):
+        _trace("app: exit")
 
     # ---------------------------------------------------------------- 模型
     def _auto_load_last(self):
@@ -539,6 +609,7 @@ class SmartToxinApp(App):
             self._alert(f"相机不可用：{e}\n可改用“选图测算”。")
 
     def _on_captured_photo(self, path, err=None):
+        _trace("kivy: _on_captured_photo path=%s" % (path,))
         if err is not None:
             self._alert(f"拍照失败：{err}\n可改用“选图测算”。")
             return
@@ -577,6 +648,7 @@ class SmartToxinApp(App):
 
     # ---------------------------------------------------------------- 推理
     def _predict_path(self, path):
+        _trace("kivy: predict start %s" % path)
         try:
             from PIL import Image
             img = Image.open(path).convert("RGB")
@@ -589,7 +661,9 @@ class SmartToxinApp(App):
             self.records.insert(0, f"{stamp}  {os.path.basename(path)}  →  {conc:.4f}")
             self.lbl_log.text = "\n".join(self.records[:30])
             self._save_record(stamp, os.path.basename(path), conc, (r, g, b))
+            _trace("kivy: predict done conc=%.4f" % conc)
         except Exception as e:
+            _trace("kivy: predict error " + str(e)[:120])
             self._alert(f"测算失败：{e}")
 
     def _save_record(self, stamp, fname, conc, rgb):
@@ -613,6 +687,7 @@ class SmartToxinApp(App):
 
 
 if __name__ == "__main__":
+    _trace("app: main start")
     try:
         SmartToxinApp().run()
     except SystemExit:
