@@ -13,6 +13,7 @@ import os
 import time
 
 from kivy.app import App
+from kivy.clock import Clock
 from kivy.core.window import Window
 from kivy.metrics import dp
 from kivy.uix.boxlayout import BoxLayout
@@ -256,10 +257,13 @@ def _pick_file(mime: str, on_path):
     _PICKER["next_req"] += 1
 
     def handler(result_code, data):
-        if result_code != Activity.RESULT_OK or data is None:
-            on_path(None)
-            return
+        # ⚠ 本回调运行在安卓 UI 线程：只做文件复制这类线程安全操作，
+        # 界面更新必须用 Clock.schedule_once 转交 Kivy 主线程，
+        # 否则跨线程操作 Kivy 控件会直接把 App 搞崩（拍照返回时已实测踩坑）
         try:
+            if result_code != Activity.RESULT_OK or data is None:
+                Clock.schedule_once(lambda dt: on_path(None), 0)
+                return
             resolver = mActivity.getContentResolver()
             uri = data.getData()
             # 1) 查询原始文件名（保留 .stmodel 等后缀）
@@ -275,10 +279,9 @@ def _pick_file(mime: str, on_path):
             except Exception:
                 name = None
             if not name:
-                name = f"imported_{int(time.time())}"
+                name = "imported_%d" % int(time.time())
             # 2) 把内容流复制到应用私有目录（分区存储下唯一可靠的读取方式）
-            user_dir = App.get_running_app().user_data_dir
-            dst = os.path.join(user_dir, name)
+            dst = os.path.join(_private_dir(), name)
             stream = resolver.openInputStream(uri)
             buf = bytearray(65536)
             with open(dst, "wb") as out:
@@ -288,9 +291,9 @@ def _pick_file(mime: str, on_path):
                         break
                     out.write(bytes(buf[:n]))
             stream.close()
-            on_path(dst)
+            Clock.schedule_once(lambda dt, p=dst: on_path(p), 0)
         except Exception as e:
-            on_path(None, e)
+            Clock.schedule_once(lambda dt, err=e: on_path(None, err), 0)
 
     _PICKER["handlers"][req] = handler
     intent = Intent(Intent.ACTION_GET_CONTENT)
@@ -348,15 +351,16 @@ def _capture_camera_photo(on_path):
     _PICKER["next_req"] += 1
 
     def handler(result_code, data):
-        if result_code != Activity.RESULT_OK:
-            on_path(None)
-            return
+        # ⚠ 本回调运行在安卓 UI 线程（Kivy 非线程安全）：
+        # 只做复制等安全操作，界面更新一律 Clock.schedule_once 转交主线程
         try:
+            if result_code != Activity.RESULT_OK:
+                Clock.schedule_once(lambda dt: on_path(None), 0)
+                return
             target = uri
             if data is not None and data.getData() is not None:
                 target = data.getData()
-            dst = os.path.join(App.get_running_app().user_data_dir,
-                               "std_%d.jpg" % int(time.time()))
+            dst = os.path.join(_private_dir(), "std_%d.jpg" % int(time.time()))
             copied = -1
             try:
                 stream = resolver.openInputStream(target)
@@ -384,9 +388,9 @@ def _capture_camera_photo(on_path):
                 if bmp is None:
                     raise RuntimeError("相机未返回照片数据")
                 _save_bitmap(bmp, dst)
-            on_path(dst)
+            Clock.schedule_once(lambda dt, p=dst: on_path(p), 0)
         except Exception as e:
-            on_path(None, e)
+            Clock.schedule_once(lambda dt, err=e: on_path(None, err), 0)
 
     _PICKER["handlers"][req] = handler
     intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
