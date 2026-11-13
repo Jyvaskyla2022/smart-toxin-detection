@@ -13,8 +13,8 @@ package.domain = org.phli
 author = PhLi
 
 source.dir = .
-# ttf：中文字体（fonts/DroidSansFallback.ttf），没有它安卓上中文全是方块
-source.include_exts = py,png,jpg,kv,txt,ttf
+# ttf/otf：中文字体（fonts/ 下），没有它们安卓上中文全是方块
+source.include_exts = py,png,jpg,kv,txt,ttf,otf
 version = 2.0.0
 
 # 依赖：kivy 界面 / numpy 数值 / pillow 图像解码与HSV / plyer 调用安卓相机

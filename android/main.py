@@ -26,19 +26,23 @@ from portable_model import PortableModel
 
 # ---- 中文支持 -------------------------------------------------------------
 # Kivy 默认字体（Roboto）不含 CJK 字形，安卓上所有中文都会显示成方块。
-# 方案：把随 APK 打包的 DroidSansFallback.ttf 注册为默认字体名 "Roboto"。
-# 注册统一在模块加载末尾执行（_register_cjk_font），字体文件三级查找：
-#   1) p4a 正常解包路径  app目录/fonts/DroidSansFallback.ttf
-#   2) app目录 根下
-#   3) 从 APK assets 现场复制到应用私有目录再注册（解包缺失时的兜底）
-# 结果记录在 _FONT_STATUS，显示在界面底部一行小字（纯 ASCII），方便截图排查。
-_FONT_NAME = "DroidSansFallback.ttf"
+# 主字体用 Noto Sans SC（拉丁字母 + 简体中文 + 常用标点全覆盖）。
+# 【踩坑记录】之前用的 DroidSansFallback 只含 CJK，不含拉丁字母、半角括号
+# 和弯引号——注册为全局默认后"中文正常了，英文/数字反而全变方块"。
+# 注册统一在模块加载末尾执行（_register_cjk_font），字体文件查找顺序：
+#   Noto（fonts/ 子目录 → app 根目录 → /sdcard）→ DroidSansFallback 同样三个位置
+#   → 都没有时，从 APK assets 现场复制到应用私有目录再注册（解包缺失兜底）
+# 结果记录在 _FONT_STATUS，显示在界面底部一行小字（方便截图排查）。
+_FONT_NAME = "NotoSansSC-Regular.otf"
+_FALLBACK_FONT_NAME = "DroidSansFallback.ttf"
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
-_FONT_CANDIDATES = [
-    os.path.join(_APP_DIR, "fonts", _FONT_NAME),
-    os.path.join(_APP_DIR, _FONT_NAME),
-    "/sdcard/SmartToxinDetection/fonts/" + _FONT_NAME,
-]
+_FONT_CANDIDATES = []
+for _n in (_FONT_NAME, _FALLBACK_FONT_NAME):
+    _FONT_CANDIDATES += [
+        os.path.join(_APP_DIR, "fonts", _n),
+        os.path.join(_APP_DIR, _n),
+        "/sdcard/SmartToxinDetection/fonts/" + _n,
+    ]
 _FONT_STATUS = "FONT: pending"
 
 
@@ -60,13 +64,16 @@ def _copy_asset_font():
         dst_dir = _private_dir()
         for asset in ("private/fonts/" + _FONT_NAME,
                       "fonts/" + _FONT_NAME,
-                      "app/fonts/" + _FONT_NAME):
+                      "app/fonts/" + _FONT_NAME,
+                      "private/fonts/" + _FALLBACK_FONT_NAME,
+                      "fonts/" + _FALLBACK_FONT_NAME,
+                      "app/fonts/" + _FALLBACK_FONT_NAME):
             try:
                 stream = am.open(asset)
             except Exception:
                 continue
             try:
-                dst = os.path.join(dst_dir, _FONT_NAME)
+                dst = os.path.join(dst_dir, os.path.basename(asset))
                 buf = bytearray(65536)
                 with open(dst, "wb") as out:
                     while True:
