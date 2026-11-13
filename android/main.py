@@ -15,10 +15,12 @@ import time
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.core.window import Window
+from kivy.graphics import Color, RoundedRectangle
 from kivy.metrics import dp
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.filechooser import FileChooserListView
+from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
 from kivy.uix.popup import Popup
 from kivy.uix.scrollview import ScrollView
@@ -237,22 +239,6 @@ def _trace(msg):
         pass
 
 
-def _read_trace():
-    try:
-        with open(_trace_path(), encoding="utf-8") as f:
-            return f.read()
-    except Exception:
-        return ""
-
-
-def _clear_trace():
-    try:
-        with open(_trace_path(), "w", encoding="utf-8") as f:
-            f.write("")
-    except Exception:
-        pass
-
-
 # ---- 系统文件选择器（SAF）--------------------------------------------------
 # 安卓 11+（含鸿蒙）启用“分区存储”后，普通文件 API 看不到 Download /
 # Documents 里的非媒体文件（.stmodel 模型正是这种），所以 Kivy 内置的
@@ -349,6 +335,52 @@ def _pick_file(mime: str, on_path):
         Intent.createChooser(intent,
                              cast("java.lang.CharSequence", String("选择文件"))),
         req)
+
+
+def _create_document(mime, title, src_path, on_saved):
+    """SAF 创建文档：弹系统"保存到…"对话框，把本地 src_path 的内容写进
+    用户选择的位置（Download 等）。分区存储下导出文件的唯一可靠方式。
+
+    on_saved(result)：None=用户取消；"ok"=成功；异常对象=失败。
+    """
+    from jnius import autoclass
+
+    mActivity = autoclass("org.kivy.android.PythonActivity").mActivity
+    Activity = autoclass("android.app.Activity")
+    Intent = autoclass("android.content.Intent")
+
+    req = _PICKER["next_req"]
+    _PICKER["next_req"] += 1
+
+    def handler(result_code, data):
+        # ⚠ 本回调运行在安卓 UI 线程：只做流读写，界面更新 Clock.schedule_once 转交
+        _trace("saver: UIthread result_code=%d" % result_code)
+        try:
+            if result_code != Activity.RESULT_OK or data is None:
+                Clock.schedule_once(lambda dt: on_saved(None), 0)
+                return
+            resolver = mActivity.getContentResolver()
+            uri = data.getData()
+            out = resolver.openOutputStream(uri)
+            with open(src_path, "rb") as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+            out.close()
+            _trace("saver: saved ok")
+            Clock.schedule_once(lambda dt: on_saved("ok"), 0)
+        except Exception as e:
+            _trace("saver: error " + str(e)[:120])
+            Clock.schedule_once(lambda dt, err=e: on_saved(err), 0)
+
+    _PICKER["handlers"][req] = handler
+    intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
+    intent.setType(mime)
+    intent.addCategory(Intent.CATEGORY_OPENABLE)
+    intent.putExtra(Intent.EXTRA_TITLE, title)
+    mActivity.startActivityForResult(intent, req)
 
 
 def _save_bitmap(bmp, dst):
@@ -500,6 +532,96 @@ def _capture_camera_photo(on_path):
 _register_cjk_font()
 
 
+# ---- 界面主题（浅灰底 + 白圆角卡片 + 青绿主色）-------------------------------
+PAGE_BG = (0.945, 0.957, 0.965, 1)
+TEAL = (0.13, 0.55, 0.47, 1)          # 主青绿
+TEAL_DARK = (0.07, 0.42, 0.36, 1)     # 深青绿（实心按钮）
+TEAL_LIGHT = (0.85, 0.94, 0.91, 1)    # 浅青绿（浅底按钮）
+TEAL_TEXT = (0.10, 0.44, 0.38, 1)
+INK = (0.15, 0.17, 0.18, 1)           # 正文
+GRAY = (0.46, 0.50, 0.52, 1)          # 次要文字
+RED = (0.78, 0.22, 0.18, 1)           # 浓度条默认色（微量红）
+RED_LIGHT = (0.99, 0.92, 0.91, 1)
+RED_TEXT = (0.78, 0.25, 0.22, 1)
+
+
+class Card(BoxLayout):
+    """白色圆角卡片容器（高度随内容自适应）。"""
+    def __init__(self, **kw):
+        super().__init__(orientation="vertical", padding=dp(14), spacing=dp(9),
+                         size_hint_y=None, **kw)
+        with self.canvas.before:
+            Color(1, 1, 1, 1)
+            self._rect = RoundedRectangle(radius=[dp(14)])
+        self.bind(pos=self._upd, size=self._upd,
+                  minimum_height=self.setter("height"))
+
+    def _upd(self, *a):
+        self._rect.pos = self.pos
+        self._rect.size = self.size
+
+
+class Flat(Button):
+    """圆角扁平按钮（自带按下变暗反馈）。
+
+    传 height 时自动设 size_hint_y=None，避免被父布局压成 0 高
+    （【踩坑】Card 里直接放的按钮，光给 height 不给 size_hint_y=None，
+    高度会被 Card 的 minimum_height 布局算成 0，只剩文字没有底色）。
+    """
+    def __init__(self, text, bg, fg, font_size="14sp", **kw):
+        self._bg = bg
+        if kw.get("height") is not None:
+            kw.setdefault("size_hint_y", None)
+        super().__init__(text=text, font_size=font_size, color=fg,
+                         background_normal="", background_down="",
+                         background_color=(0, 0, 0, 0), bold=True, **kw)
+        with self.canvas.before:
+            self._col = Color(*bg)
+            self._rect = RoundedRectangle(radius=[dp(10)])
+        self.bind(pos=self._upd, size=self._upd, state=self._on_state)
+
+    def _upd(self, *a):
+        self._rect.pos = self.pos
+        self._rect.size = self.size
+
+    def _on_state(self, inst, st):
+        r, g, b, a = self._bg
+        f = 0.85 if st == "down" else 1.0
+        self._col.rgb = (r * f, g * f, b * f)
+
+
+class ColorBar(BoxLayout):
+    """测算结果的颜色条，set_rgb() 显示照片实测色。"""
+    def __init__(self, **kw):
+        super().__init__(size_hint_y=None, height=dp(12), **kw)
+        with self.canvas.before:
+            self._col = Color(*RED)
+            self._rect = RoundedRectangle(radius=[dp(6)])
+        self.bind(pos=self._upd, size=self._upd)
+
+    def _upd(self, *a):
+        self._rect.pos = self.pos
+        self._rect.size = self.size
+
+    def set_rgb(self, r, g, b):
+        self._col.rgb = (r / 255.0, g / 255.0, b / 255.0)
+
+
+def card_header(text):
+    lbl = Label(text=f"[b]{text}[/b]", markup=True, color=TEAL_TEXT,
+                font_size="14.5sp", halign="left", size_hint_y=None, height=dp(22))
+    lbl.bind(width=lambda inst, w: setattr(inst, "text_size", (w, None)))
+    return lbl
+
+
+def body_label(text, color=INK, font_size="12.5sp", halign="left", **kw):
+    lbl = Label(text=text, color=color, font_size=font_size, halign=halign,
+                valign="top", size_hint_y=None, **kw)
+    lbl.bind(width=lambda inst, w: setattr(inst, "text_size", (w, None)),
+             texture_size=lambda inst, ts: setattr(inst, "height", max(ts[1], 1)))
+    return lbl
+
+
 class SmartToxinApp(App):
     title = f"{APP_NAME} v{APP_VERSION} (by {APP_AUTHOR})"
 
@@ -511,52 +633,102 @@ class SmartToxinApp(App):
             except Exception:
                 pass
 
-        root = BoxLayout(orientation="vertical", padding=dp(10), spacing=dp(8))
+        Window.clearcolor = PAGE_BG
+        self.last_vec = None
+        self.last_rgb = None
 
-        root.add_widget(Label(
-            text=f"[b]{APP_NAME}[/b]  v{APP_VERSION}\n代码设计者：{APP_AUTHOR}",
-            markup=True, halign="center", size_hint_y=None, height=dp(58),
-            font_size="15sp"))
+        page = ScrollView()
+        root = GridLayout(cols=1, padding=dp(16), spacing=dp(12),
+                          size_hint_y=None)
+        root.bind(minimum_height=root.setter("height"))
 
-        self.lbl_model = Label(text="模型：未加载（点“选择模型”）", halign="left",
-                               size_hint_y=None, height=dp(46),
-                               text_size=(Window.width - dp(20), None), font_size="12sp")
-        root.add_widget(self.lbl_model)
+        # 标题区
+        title = Label(text=f"[b]{APP_NAME}[/b]", markup=True, font_size="21sp",
+                      color=INK, halign="center", size_hint_y=None, height=dp(30))
+        title.bind(width=lambda inst, w: setattr(inst, "text_size", (w, None)))
+        root.add_widget(title)
+        root.add_widget(body_label(
+            f"试管毒素浓度测算 · 手机离线版 v{APP_VERSION} · 代码设计者：{APP_AUTHOR}",
+            color=GRAY, font_size="11.5sp", halign="center"))
 
-        btns = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(6))
-        btns.add_widget(Button(text="选择模型", on_press=self.pick_model, font_size="13sp"))
-        btns.add_widget(Button(text="拍照测算", on_press=self.take_photo, font_size="13sp"))
-        btns.add_widget(Button(text="选图测算", on_press=self.pick_image, font_size="13sp"))
-        root.add_widget(btns)
+        # ① 加载模型
+        c1 = Card()
+        c1.add_widget(card_header("① 加载模型 .stmodel"))
+        btn_model = Flat("＋ 选择便携模型文件", TEAL_LIGHT, TEAL_TEXT, height=dp(46))
+        btn_model.bind(on_press=self.pick_model)
+        c1.add_widget(btn_model)
+        self.lbl_model = body_label(
+            "未加载模型。请先在电脑端「模型库」导出 .stmodel，再传到手机。")
+        c1.add_widget(self.lbl_model)
+        c1.add_widget(body_label(
+            "模型一旦加载就会记住在本机，下次打开无需重复选择。",
+            color=GRAY, font_size="11sp"))
+        root.add_widget(c1)
 
-        self.lbl_result = Label(
-            text="测算结果将显示在这里\n\n拍摄条件要与电脑端训练时一致\n（同背景、同距离、同光照）",
-            halign="center", valign="middle", font_size="20sp", color=(0.70, 0.14, 0.12, 1))
-        root.add_widget(self.lbl_result)
+        # ② 采集照片
+        c2 = Card()
+        c2.add_widget(card_header("② 采集照片"))
+        row2 = BoxLayout(spacing=dp(10), size_hint_y=None, height=dp(46))
+        btn_photo = Flat("拍照测算", TEAL_DARK, (1, 1, 1, 1))
+        btn_photo.bind(on_press=self.take_photo)
+        btn_gallery = Flat("从相册选择", TEAL_LIGHT, TEAL_TEXT)
+        btn_gallery.bind(on_press=self.pick_image)
+        row2.add_widget(btn_photo)
+        row2.add_widget(btn_gallery)
+        c2.add_widget(row2)
+        c2.add_widget(body_label(
+            "拍摄要求与电脑端训练时一致：同一背景、同一距离、同一光照，"
+            "试管置于画面正中央。", color=GRAY, font_size="11.5sp"))
+        root.add_widget(c2)
 
-        root.add_widget(Label(text="最近测算记录", size_hint_y=None, height=dp(24),
-                              halign="left", font_size="12sp"))
-        scroll = ScrollView()
-        self.lbl_log = Label(text="", halign="left", valign="top", size_hint_y=None,
-                             font_size="12sp")
-        self.lbl_log.bind(width=lambda inst, w: setattr(inst, "text_size", (w, None)),
-                          texture_size=lambda inst, ts: setattr(inst, "height", ts[1]))
-        scroll.add_widget(self.lbl_log)
-        root.add_widget(scroll)
+        # ③ 测算结果
+        c3 = Card()
+        c3.add_widget(card_header("③ 测算结果"))
+        self.color_bar = ColorBar()
+        c3.add_widget(self.color_bar)
+        self.lbl_conc = Label(text="尚未测算", font_size="26sp", color=INK,
+                              halign="center", size_hint_y=None, height=dp(54))
+        self.lbl_conc.bind(width=lambda inst, w: setattr(inst, "text_size", (w, None)))
+        c3.add_widget(self.lbl_conc)
+        self.lbl_rgb = body_label(" ", color=GRAY, font_size="12sp", halign="center")
+        c3.add_widget(self.lbl_rgb)
+        btn_detail = Flat("▶ 查看特征明细", TEAL_LIGHT, TEAL_TEXT,
+                          font_size="12.5sp", height=dp(36))
+        btn_detail.bind(on_press=self.toggle_detail)
+        self.btn_detail = btn_detail
+        c3.add_widget(btn_detail)
+        self.lbl_detail = body_label("", color=INK, font_size="11.5sp")
+        c3.add_widget(self.lbl_detail)
+        root.add_widget(c3)
+
+        # ④ 测算记录
+        c4 = Card()
+        self.lbl_records = card_header("④ 测算记录（0 条）")
+        c4.add_widget(self.lbl_records)
+        rec_scroll = ScrollView(size_hint_y=None, height=dp(120))
+        self.lbl_log = body_label("暂无记录", color=GRAY, font_size="12sp")
+        # 记录少时列表区跟着内容收缩（上限 150dp），避免大片空白
+        self.lbl_log.bind(texture_size=lambda inst, ts: setattr(
+            rec_scroll, "height", min(dp(150), ts[1] + dp(10))))
+        rec_scroll.add_widget(self.lbl_log)
+        c4.add_widget(rec_scroll)
+        row4 = BoxLayout(spacing=dp(10), size_hint_y=None, height=dp(42))
+        btn_export = Flat("导出 CSV", TEAL_LIGHT, TEAL_TEXT)
+        btn_export.bind(on_press=self.export_csv)
+        btn_clear = Flat("清空记录", RED_LIGHT, RED_TEXT)
+        btn_clear.bind(on_press=self.clear_records)
+        row4.add_widget(btn_export)
+        row4.add_widget(btn_clear)
+        c4.add_widget(row4)
+        root.add_widget(c4)
+
+        page.add_widget(root)
 
         self.model = None
         self.records = []
         self._auto_load_last()
         _trace("kivy: build done")
-        # 上次会话若留有轨迹且最后一笔不是正常退出 → 判定为上闪退，弹出供截图
-        prev = _read_trace().strip()
-        if prev:
-            _clear_trace()
-            last = prev.splitlines()[-1]
-            if "app: exit" not in last:
-                Clock.schedule_once(
-                    lambda dt: self._alert("上次运行轨迹（请截图发我）：\n" + prev[-900:]), 0)
-        return root
+        return page
 
     def on_pause(self):
         _trace("lifecycle: on_pause")
@@ -593,7 +765,7 @@ class SmartToxinApp(App):
             extra = f"{len(m['trees'])} 棵树"
         else:
             extra = "线性系数"
-        self.lbl_model.text = (f"模型：[{self.model.sample_type}] {self.model.model_name}\n"
+        self.lbl_model.text = (f"已加载：[{self.model.sample_type}] {self.model.model_name}\n"
                                f"{algo} ｜ 特征 {nf} 维 ｜ {extra}")
         try:
             with open(os.path.join(self.user_data_dir, "last_model.txt"), "w",
@@ -696,16 +868,81 @@ class SmartToxinApp(App):
             vec = self.model.feature_vector(img)
             conc = self.model.predict(img)
             r, g, b = vec[0] * 255, vec[1] * 255, vec[2] * 255
-            self.lbl_result.text = (f"测算浓度：{conc:.4f}\n"
-                                   f"R {r:.0f} / G {g:.0f} / B {b:.0f}")
+            self.lbl_conc.text = f"{conc:.4f}"
+            self.lbl_rgb.text = f"R {r:.0f} · G {g:.0f} · B {b:.0f}"
+            self.color_bar.set_rgb(r, g, b)
+            self.last_vec = vec
+            self.last_rgb = (r, g, b)
             stamp = time.strftime("%m-%d %H:%M:%S")
             self.records.insert(0, f"{stamp}  {os.path.basename(path)}  →  {conc:.4f}")
             self.lbl_log.text = "\n".join(self.records[:30])
+            self._upd_record_count()
             self._save_record(stamp, os.path.basename(path), conc, (r, g, b))
             _trace("kivy: predict done conc=%.4f" % conc)
         except Exception as e:
             _trace("kivy: predict error " + str(e)[:120])
             self._alert(f"测算失败：{e}")
+
+    def toggle_detail(self, *_):
+        """展开 / 收起 13 维特征明细。"""
+        if self.last_vec is None:
+            self._alert("还没有测算结果，先拍照或从相册选一张照片。")
+            return
+        if self.lbl_detail.text:
+            self.lbl_detail.text = ""
+            self.btn_detail.text = "▶ 查看特征明细"
+            return
+        names = self.model.spec.get("feature_names", [])
+        lines = []
+        for i, v in enumerate(self.last_vec):
+            name = names[i] if i < len(names) else f"特征{i + 1}"
+            lines.append(f"{name}   {v:.3f}")
+        self.lbl_detail.text = "\n".join(lines)
+        self.btn_detail.text = "━ 收起特征明细"
+
+    def _upd_record_count(self):
+        self.lbl_records.text = f"[b]④ 测算记录（{len(self.records)} 条）[/b]"
+
+    def export_csv(self, *_):
+        """把测算记录导出为 CSV（安卓走系统“保存到…”对话框，用户选位置）。"""
+        fp = os.path.join(self.user_data_dir, "手机测算记录.csv")
+        if not self.records or not os.path.isfile(fp):
+            self._alert("还没有测算记录，先拍照或从相册测算一次。")
+            return
+        if _ANDROID:
+            try:
+                _create_document("text/csv", "手机测算记录.csv", fp, self._on_exported)
+                return
+            except Exception as e:
+                self._alert(f"导出启动失败：{e}")
+                return
+        # 非 Android（电脑开发调试）：复制到当前目录
+        try:
+            import shutil
+            shutil.copyfile(fp, os.path.join(os.getcwd(), "手机测算记录.csv"))
+            self._alert("已导出到程序目录：手机测算记录.csv")
+        except Exception as e:
+            self._alert(f"导出失败：{e}")
+
+    def _on_exported(self, result, err=None):
+        if err is not None:
+            self._alert(f"导出失败：{err}")
+        elif result == "ok":
+            self._alert("已导出 CSV。可在文件管理器的「下载」目录\n（或导出时选择的位置）找到它。")
+        # result None = 用户取消，不打扰
+
+    def clear_records(self, *_):
+        if not self.records:
+            self._alert("当前没有可清空的记录。")
+            return
+        self.records = []
+        self.lbl_log.text = "暂无记录"
+        self._upd_record_count()
+        try:
+            os.remove(os.path.join(self.user_data_dir, "手机测算记录.csv"))
+        except Exception:
+            pass
+        self._alert("已清空全部测算记录。")
 
     def _save_record(self, stamp, fname, conc, rgb):
         """追加写入手机端测算历史（CSV，UTF-8 BOM 便于 Excel 打开）。"""
@@ -722,9 +959,14 @@ class SmartToxinApp(App):
             pass
 
     def _alert(self, msg):
-        Popup(title="提示",
-              content=Label(text=msg, text_size=(Window.width * 0.8, None)),
-              size_hint=(0.85, 0.4)).open()
+        box = BoxLayout(orientation="vertical", padding=dp(12))
+        lbl = body_label(msg, color=INK, font_size="13sp")
+        box.add_widget(lbl)
+        popup = Popup(title="提示", content=box, size_hint=(0.88, None), height=dp(120))
+        # 高度跟随文字实际行数，避免文字超出弹窗（之前轨迹弹窗文字重叠的教训）
+        lbl.bind(texture_size=lambda inst, ts: setattr(
+            popup, "height", min(Window.height * 0.7, ts[1] + dp(64))))
+        popup.open()
 
 
 if __name__ == "__main__":
