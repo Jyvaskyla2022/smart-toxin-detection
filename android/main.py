@@ -398,46 +398,86 @@ def _capture_camera_photo(on_path):
 
     def handler(result_code, data):
         # ⚠ 本回调运行在安卓 UI 线程（Kivy 非线程安全）：
-        # 只做复制等安全操作，界面更新一律 Clock.schedule_once 转交主线程
+        # 只做 JNI/文件操作，界面更新一律 Clock.schedule_once 转交主线程
         _trace("camera: UIthread result_code=%d" % result_code)
         try:
             if result_code != Activity.RESULT_OK:
                 _trace("camera: canceled, schedule on_path(None)")
                 Clock.schedule_once(lambda dt: on_path(None), 0)
                 return
+            _trace("camera: result ok")
             target = uri
-            if data is not None and data.getData() is not None:
-                target = data.getData()
+            try:
+                u = data.getData() if data is not None else None
+                if u is not None:
+                    target = u
+            except Exception as e:
+                _trace("camera: getData fail " + str(e)[:80])
+            _trace("camera: target ok")
+
+            # 方案 A：查媒体记录的真实文件路径，让 PIL 直接打开 ——
+            # 完全绕开 ContentResolver 流。上一轮轨迹显示崩溃发生在
+            # openInputStream / 流读取一带（原生层），方案 A 走通就根本不碰流。
+            # （应用自己插入的媒体记录，其真实路径对本体应用直接可读）
+            real = None
+            try:
+                cur = resolver.query(target, None, None, None, None)
+                if cur is not None:
+                    if cur.moveToFirst():
+                        idx = cur.getColumnIndex("_data")
+                        if idx >= 0:
+                            real = cur.getString(idx)
+                    cur.close()
+            except Exception as e:
+                real = None
+                _trace("camera: query fail " + str(e)[:100])
+            _trace("camera: real path %s" % (real,))
+            if real and os.path.isfile(real) and os.path.getsize(real) > 0:
+                _trace("camera: direct path ok, schedule on_path")
+                Clock.schedule_once(lambda dt, p=real: on_path(p), 0)
+                return
+
+            # 方案 B：ContentResolver 流复制（64KB 分块）
             dst = os.path.join(_private_dir(), "std_%d.jpg" % int(time.time()))
             copied = -1
             try:
+                _trace("camera: stream opening")
                 stream = resolver.openInputStream(target)
+                _trace("camera: stream opened")
                 copied = 0
                 buf = bytearray(65536)
                 with open(dst, "wb") as out:
                     while True:
                         n = stream.read(buf)
+                        if copied == 0:
+                            _trace("camera: first chunk n=%d" % n)
                         if n <= 0:
                             break
                         out.write(bytes(buf[:n]))
                         copied += n
                 stream.close()
-            except Exception:
+            except Exception as e:
                 copied = -1
+                _trace("camera: copy err " + str(e)[:100])
             _trace("camera: copied=%d bytes" % copied)
-            if copied <= 0:
-                # 兜底：部分相机忽略 EXTRA_OUTPUT，只返回缩略图 Bitmap
-                bmp = None
-                try:
-                    extras = data.getExtras()
-                    if extras is not None:
-                        bmp = extras.get("data")
-                except Exception:
-                    bmp = None
-                if bmp is None:
-                    raise RuntimeError("相机未返回照片数据")
-                _save_bitmap(bmp, dst)
-            _trace("camera: schedule on_path")
+            if copied > 0:
+                _trace("camera: schedule on_path")
+                Clock.schedule_once(lambda dt, p=dst: on_path(p), 0)
+                return
+
+            # 方案 C：部分相机忽略 EXTRA_OUTPUT，只返回缩略图 Bitmap
+            _trace("camera: bitmap fallback")
+            bmp = None
+            try:
+                extras = data.getExtras()
+                if extras is not None:
+                    bmp = extras.get("data")
+            except Exception as e:
+                _trace("camera: extras fail " + str(e)[:80])
+            if bmp is None:
+                raise RuntimeError("相机未返回照片数据（三条取图路径都失败）")
+            _save_bitmap(bmp, dst)
+            _trace("camera: bitmap saved, schedule on_path")
             Clock.schedule_once(lambda dt, p=dst: on_path(p), 0)
         except Exception as e:
             _trace("camera: error " + str(e)[:120])
@@ -452,6 +492,7 @@ def _capture_camera_photo(on_path):
                     cast("android/os/Parcelable", uri))
     intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+    _trace("camera: intent fired req=%d" % req)
     mActivity.startActivityForResult(intent, req)
 
 
@@ -600,6 +641,7 @@ class SmartToxinApp(App):
 
     # ---------------------------------------------------------------- 采集
     def take_photo(self, *_):
+        _trace("kivy: take_photo")
         if self.model is None:
             self._alert("请先选择便携模型（.stmodel）")
             return
