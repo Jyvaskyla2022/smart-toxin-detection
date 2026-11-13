@@ -101,12 +101,14 @@ def _register_cjk_font():
         return
     try:
         from kivy.core.text import LabelBase
+        # 注意：Kivy 的参数名是 fn_bolditalic（bold 和 italic 之间没有下划线），
+        # 写成 fn_bold_italic 会抛 TypeError，这正是之前闪退/方块的根因
         LabelBase.register(
             name="Roboto",
             fn_regular=path,
             fn_bold=path,
             fn_italic=path,
-            fn_bold_italic=path,
+            fn_bolditalic=path,
         )
         _FONT_STATUS = "FONT: OK " + path
     except Exception as e:
