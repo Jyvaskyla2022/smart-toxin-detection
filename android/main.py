@@ -406,14 +406,13 @@ def _capture_camera_photo(on_path):
                 Clock.schedule_once(lambda dt: on_path(None), 0)
                 return
             _trace("camera: result ok")
+            # 【踩坑·确诊】两轮轨迹（第 13/14 轮）都表明：相机返回的 Intent
+            # 一调 data.getData() 就原生层崩溃（python 的 try/except 拦不住），
+            # 而选图器返回的 Intent 调同样的方法却没事。拍照用的是 EXTRA_OUTPUT，
+            # 照片一定会写进我们自己插入的 MediaStore 记录，所以干脆完全不碰
+            # 返回 Intent 的数据部分，直接用自己的 uri。
             target = uri
-            try:
-                u = data.getData() if data is not None else None
-                if u is not None:
-                    target = u
-            except Exception as e:
-                _trace("camera: getData fail " + str(e)[:80])
-            _trace("camera: target ok")
+            _trace("camera: use own MediaStore uri")
 
             # 方案 A：查媒体记录的真实文件路径，让 PIL 直接打开 ——
             # 完全绕开 ContentResolver 流。上一轮轨迹显示崩溃发生在
