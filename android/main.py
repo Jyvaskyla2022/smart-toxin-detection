@@ -302,6 +302,100 @@ def _pick_file(mime: str, on_path):
         req)
 
 
+def _save_bitmap(bmp, dst):
+    """把相机返回的缩略图 Bitmap 压缩保存为 jpg（相机忽略 EXTRA_OUTPUT 时的兜底）。"""
+    from jnius import autoclass
+    fmt = autoclass("android.graphics.Bitmap$CompressFormat").JPEG
+    out = autoclass("java.io.FileOutputStream")(dst)
+    ok = bmp.compress(fmt, 92, out)
+    out.close()
+    if not ok:
+        raise RuntimeError("Bitmap 压缩失败")
+
+
+def _capture_camera_photo(on_path):
+    """调系统相机拍照，拍完复制到应用私有目录，回调 on_path(本地路径)。
+
+    【踩坑记录】plyer 的安卓相机实现把 file:// URI 放进 Intent 传给系统相机，
+    安卓 7（API 24）起跨应用传 file:// URI 会直接抛
+    android.os.FileUriExposedException（targetSdk 越高越严格）。
+    正确做法：先在 MediaStore 插入一条记录拿 content:// URI，把它作为
+    EXTRA_OUTPUT 交给系统相机（带读写授权 flags），拍完后把内容流复制回
+    应用私有目录——与"导入模型"同一套安全模式。
+    """
+    from jnius import autoclass
+
+    mActivity = autoclass("org.kivy.android.PythonActivity").mActivity
+    Activity = autoclass("android.app.Activity")
+    Intent = autoclass("android.content.Intent")
+    MediaStore = autoclass("android.provider.MediaStore")
+    MediaImages = autoclass("android.provider.MediaStore$Images$Media")
+    ContentValues = autoclass("android.content.ContentValues")
+    resolver = mActivity.getContentResolver()
+
+    values = ContentValues()
+    values.put("_display_name", "std_%d.jpg" % int(time.time()))
+    values.put("mime_type", "image/jpeg")
+    try:
+        values.put("relative_path", "Pictures/SmartToxinDetection")  # 安卓 10+
+    except Exception:
+        pass
+    uri = resolver.insert(MediaImages.EXTERNAL_CONTENT_URI, values)
+    if uri is None:
+        raise RuntimeError("无法创建媒体记录")
+
+    req = _PICKER["next_req"]
+    _PICKER["next_req"] += 1
+
+    def handler(result_code, data):
+        if result_code != Activity.RESULT_OK:
+            on_path(None)
+            return
+        try:
+            target = uri
+            if data is not None and data.getData() is not None:
+                target = data.getData()
+            dst = os.path.join(App.get_running_app().user_data_dir,
+                               "std_%d.jpg" % int(time.time()))
+            copied = -1
+            try:
+                stream = resolver.openInputStream(target)
+                copied = 0
+                buf = bytearray(65536)
+                with open(dst, "wb") as out:
+                    while True:
+                        n = stream.read(buf)
+                        if n <= 0:
+                            break
+                        out.write(bytes(buf[:n]))
+                        copied += n
+                stream.close()
+            except Exception:
+                copied = -1
+            if copied <= 0:
+                # 兜底：部分相机忽略 EXTRA_OUTPUT，只返回缩略图 Bitmap
+                bmp = None
+                try:
+                    extras = data.getExtras()
+                    if extras is not None:
+                        bmp = extras.get("data")
+                except Exception:
+                    bmp = None
+                if bmp is None:
+                    raise RuntimeError("相机未返回照片数据")
+                _save_bitmap(bmp, dst)
+            on_path(dst)
+        except Exception as e:
+            on_path(None, e)
+
+    _PICKER["handlers"][req] = handler
+    intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+    intent.putExtra(MediaStore.EXTRA_OUTPUT, uri)
+    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+    mActivity.startActivityForResult(intent, req)
+
+
 # 模块加载的统一入口：此时 _ANDROID 已就绪、界面 Label 尚未创建，
 # 在这里注册字体正好赶在第一个控件之前
 _register_cjk_font()
@@ -440,15 +534,15 @@ class SmartToxinApp(App):
             self._alert("请先选择便携模型（.stmodel）")
             return
         try:
-            from plyer import camera
-            # 安卓上 plyer 需要绝对路径，否则拍照保存失败
-            filename = os.path.join(self.user_data_dir, f"std_{int(time.time())}.jpg")
-            camera.take_picture(filename=filename, on_complete=self._on_photo)
+            _capture_camera_photo(self._on_captured_photo)
         except Exception as e:
             self._alert(f"相机不可用：{e}\n可改用“选图测算”。")
 
-    def _on_photo(self, path):
-        if path and os.path.isfile(path):
+    def _on_captured_photo(self, path, err=None):
+        if err is not None:
+            self._alert(f"拍照失败：{err}\n可改用“选图测算”。")
+            return
+        if path:
             self._predict_path(path)
 
     def pick_image(self, *_):
